@@ -322,6 +322,7 @@ const EMOJI_FONT = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans
 
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
+let dpr = 1;                     // 设备像素比：按屏幕密度放大画布，避免拉伸模糊
 let city = null;
 let staticMap = null;
 let prevState = null, curState = null;
@@ -348,6 +349,26 @@ let aiSkillIdx = 0;
 const $ = id => document.getElementById(id);
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
 
+/* 画布按屏幕像素密度放大，绘图代码仍用 1000×740 的逻辑坐标。
+   CSS 会把画布缩放到容器宽度，若后备缓冲区只有 1000px，高分屏上整幅图都会被放大发虚。 */
+function setupCanvas(){
+  dpr = clamp(window.devicePixelRatio || 1, 1, 3);
+  cv.width = Math.round(W * dpr);
+  cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const next = clamp(window.devicePixelRatio || 1, 1, 3);
+    if (next === dpr) return;
+    setupCanvas();
+    if (city){ staticMap = buildStaticMap(city); }
+  }, 200);
+});
+
 function lerp(a,b,t){ return a + (b-a)*t; }
 function lerpAngle(a,b,t){
   let d = ((b-a+Math.PI) % (Math.PI*2) + Math.PI*2) % (Math.PI*2) - Math.PI;
@@ -363,8 +384,10 @@ function roundRect(g,x,y,w,h,r){
 /* ============================================================ 静态地图（缓存到离屏画布） */
 function buildStaticMap(c){
   const off = document.createElement('canvas');
-  off.width = W; off.height = H;
+  off.width = Math.round(W * dpr);
+  off.height = Math.round(H * dpr);
   const g = off.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   // 底色（草地 / 城市地面）
   g.fillStyle = COLORS.bg; g.fillRect(0,0,W,H);
@@ -602,14 +625,19 @@ function drawCar(c){
   // 车身：消防车同款的深红，比背景暗一档
   ctx.fillStyle = body;
   roundRect(ctx, -13, -7, 26, 14, 4); ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = 1;
+  roundRect(ctx, -12.4, -6.4, 24.8, 12.8, 3.6); ctx.stroke();
   // 车顶 / 车窗
   ctx.fillStyle = 'rgba(10,10,14,.82)';
   roundRect(ctx, -5.5, -5, 9, 10, 2); ctx.fill();
-  // 车头灯
+  // 车头灯：带一点光晕，暗色路面上也能看出车头朝向
+  ctx.save();
+  ctx.shadowColor = 'rgba(253,230,138,.9)'; ctx.shadowBlur = 6;
   ctx.fillStyle = '#fde68a';
   roundRect(ctx, 10, -5.5, 2.4, 3, 1); ctx.fill();
   roundRect(ctx, 10, 2.5, 2.4, 3, 1); ctx.fill();
+  ctx.restore();
   ctx.restore();
 
   // 让行标记：路口让行 / 路侧避让 / 借道绕行
@@ -633,13 +661,18 @@ function drawCar(c){
 
 function drawPed(p){
   ctx.save();
-  ctx.font = '13px ' + EMOJI_FONT;
+  // 脚下阴影 + 深色描边，避免小人在深色路面上"糊"掉
+  ctx.fillStyle = 'rgba(0,0,0,.32)';
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + 5, 7, 3, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.font = '14.5px ' + EMOJI_FONT;
   ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.shadowColor = 'rgba(0,0,0,.75)'; ctx.shadowBlur = 3;
   ctx.fillText(p.emoji || '🚶', p.x, p.y);
+  ctx.shadowBlur = 0;
   if (p.state === 'waiting'){
-    ctx.font = '8px ' + EMOJI_FONT;
+    ctx.font = '9px ' + EMOJI_FONT;
     ctx.fillStyle = '#fbbf24';
-    ctx.fillText('⏳', p.x+8, p.y-11);
+    ctx.fillText('⏳', p.x+9, p.y-12);
   }
   ctx.restore();
 }
@@ -649,97 +682,162 @@ function drawTruck(t, s, now){
   const checking = s.self_check && s.self_check.running;
   const pulse = 0.5 + 0.5 * Math.sin(now / 170);
   const blink = Math.floor(now / 150) % 2 === 0;
+  const RING = 34;      // 定位环半径
+  const GLOW = 70;      // 地面光晕半径
 
-  // 车体光晕：把消防车从深色路面和小车中“托”出来
+  // 暖色地面光晕：深蓝路面上最“烫”的一块，先把视线吸过来
   ctx.save();
-  const halo = ctx.createRadialGradient(x, y, 8, x, y, 62);
-  halo.addColorStop(0, 'rgba(125,211,252,.42)');
-  halo.addColorStop(.42, 'rgba(56,189,248,.18)');
-  halo.addColorStop(1, 'rgba(56,189,248,0)');
+  const halo = ctx.createRadialGradient(x, y, 8, x, y, GLOW);
+  halo.addColorStop(0, 'rgba(255,244,214,.22)');
+  halo.addColorStop(.45, 'rgba(255,214,150,.10)');
+  halo.addColorStop(1, 'rgba(255,214,150,0)');
   ctx.fillStyle = halo;
-  ctx.beginPath(); ctx.arc(x, y, 62, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x, y, GLOW, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 
   // 自检扫描圈（放在车下面）
   if (checking){
-    const r = 40 + 5 * Math.sin(now / 140);
-    ctx.strokeStyle = 'rgba(56,189,248,.8)'; ctx.lineWidth = 2;
+    const r = 52 + 5 * Math.sin(now / 140);
+    ctx.strokeStyle = 'rgba(56,189,248,.85)'; ctx.lineWidth = 2;
     ctx.setLineDash([7, 7]); ctx.lineDashOffset = -now / 40;
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = 'rgba(56,189,248,.9)'; ctx.font = '11px "Microsoft YaHei",sans-serif';
-    ctx.textAlign = 'center'; ctx.fillText('自检扫描', x, y - 72);
+    ctx.fillStyle = 'rgba(56,189,248,.95)'; ctx.font = 'bold 11px "Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('自检扫描', x, y - 96);
   }
+
+  // 定位环：白色虚线随呼吸轻微缩放，和深红私家车彻底区分
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = 'rgba(255,255,255,.92)'; ctx.lineWidth = 2.4;
+  ctx.setLineDash([9, 7]); ctx.lineDashOffset = -now / 45;
+  ctx.beginPath(); ctx.arc(0, 0, RING + pulse * 1.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // 车头方向箭头
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(heading);
+  ctx.fillStyle = 'rgba(125,211,252,.95)';
+  ctx.strokeStyle = 'rgba(8,20,36,.6)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(RING + 10, 0); ctx.lineTo(RING + 3, -5); ctx.lineTo(RING + 3, 5);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+
+  // 俯视消防车：红车身 + 白腰线 + 银色云梯 + 红蓝警灯
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(heading);
 
   // 车身阴影
   ctx.fillStyle = 'rgba(0,0,0,.5)';
-  ctx.beginPath(); ctx.ellipse(x + 2, y + 7, 20, 12, heading, 0, Math.PI * 2); ctx.fill();
+  roundRect(ctx, -25, -9, 54, 26, 6); ctx.fill();
 
-  // 高对比度定位环：始终围绕消防车，避免和同色系私家车混在一起
+  // 车轮
+  ctx.fillStyle = '#0b1220';
+  roundRect(ctx, -18, -14.8, 9, 4.2, 2); ctx.fill();
+  roundRect(ctx, -18, 10.6, 9, 4.2, 2); ctx.fill();
+  roundRect(ctx, 8, -14.8, 9, 4.2, 2); ctx.fill();
+  roundRect(ctx, 8, 10.6, 9, 4.2, 2); ctx.fill();
+
+  // 红色车身（车头亮、车尾暗）
+  const body = ctx.createLinearGradient(0, -12, 0, 12);
+  body.addColorStop(0, '#ff6b6b');
+  body.addColorStop(.42, '#e52525');
+  body.addColorStop(1, '#a11212');
+  ctx.fillStyle = body;
+  roundRect(ctx, -27, -12, 54, 24, 6); ctx.fill();
+
+  // 白色驾驶室：红车身 + 白车头，在深色路面上对比最强
+  const cab = ctx.createLinearGradient(0, -12, 0, 12);
+  cab.addColorStop(0, '#ffffff');
+  cab.addColorStop(.55, '#e8eef6');
+  cab.addColorStop(1, '#b8c4d4');
+  ctx.fillStyle = cab;
+  roundRect(ctx, 11, -11.6, 15.6, 23.2, 5.4); ctx.fill();
+
+  // 白色腰线（红车身两侧）
+  ctx.fillStyle = 'rgba(255,255,255,.95)';
+  roundRect(ctx, -22, -11.4, 30, 3.2, 1.6); ctx.fill();
+  roundRect(ctx, -22, 8.2, 30, 3.2, 1.6); ctx.fill();
+
+  // 车顶云梯
+  ctx.fillStyle = '#dbe3ec';
+  roundRect(ctx, -15, -4, 22, 8, 2.2); ctx.fill();
+  ctx.strokeStyle = 'rgba(100,116,139,.9)'; ctx.lineWidth = 1.1;
+  for (let i = -12; i <= 5; i += 5){
+    ctx.beginPath(); ctx.moveTo(i, -3.6); ctx.lineTo(i, 3.6); ctx.stroke();
+  }
+
+  // 车尾黄黑警示条
   ctx.save();
-  ctx.translate(x, y);
-  ctx.strokeStyle = 'rgba(125,211,252,.9)';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([9, 6]); ctx.lineDashOffset = -now / 55;
-  ctx.beginPath(); ctx.arc(0, 0, 27 + pulse * 1.5, 0, Math.PI * 2); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.strokeStyle = 'rgba(56,189,248,.28)';
-  ctx.lineWidth = 7;
-  ctx.beginPath(); ctx.arc(0, 0, 27, 0, Math.PI * 2); ctx.stroke();
+  roundRect(ctx, -27, -12, 7, 24, 3.4); ctx.clip();
+  ctx.fillStyle = '#facc15'; ctx.fillRect(-28, -13, 9, 26);
+  ctx.strokeStyle = 'rgba(17,24,39,.85)'; ctx.lineWidth = 2.6;
+  for (let d = -14; d <= 14; d += 5.4){
+    ctx.beginPath(); ctx.moveTo(-28, d); ctx.lineTo(-19, d - 4.4); ctx.stroke();
+  }
   ctx.restore();
 
-  // 深色圆底盘 + 亮色描边，让系统 emoji 保持原样但更清晰、更醒目
+  // 前挡风玻璃
+  ctx.fillStyle = '#0b1220';
+  roundRect(ctx, 19.4, -9.6, 6, 19.2, 2.4); ctx.fill();
+  ctx.fillStyle = 'rgba(125,211,252,.45)';
+  roundRect(ctx, 20.6, -8.2, 2, 16.4, 1); ctx.fill();
+
+  // 车顶警灯条：红蓝交替爆闪
   ctx.save();
-  ctx.fillStyle = 'rgba(7,18,33,.92)';
-  ctx.beginPath(); ctx.arc(x, y, 23, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = 'rgba(125,211,252,.95)'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(x, y, 23, 0, Math.PI * 2); ctx.stroke();
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = blink ? '#7dd3fc' : 'rgba(56,189,248,.35)';
+  ctx.shadowColor = '#38bdf8';
+  roundRect(ctx, 4, -11, 4.6, 9, 1.8); ctx.fill();
+  ctx.fillStyle = blink ? 'rgba(239,68,68,.35)' : '#f87171';
+  ctx.shadowColor = '#ef4444';
+  roundRect(ctx, 4, 2, 4.6, 9, 1.8); ctx.fill();
   ctx.restore();
 
-  // 消防车本体：系统 emoji，不自定义角色样貌；放大到 38px 提高辨识度
+  // 车头灯
   ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(heading + Math.PI);
-  ctx.font = '38px ' + EMOJI_FONT;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('🚒', 0, 0);
+  ctx.shadowColor = '#fef08a'; ctx.shadowBlur = 11;
+  ctx.fillStyle = '#fef9c3';
+  roundRect(ctx, 23, -9.4, 3.4, 5, 1.6); ctx.fill();
+  roundRect(ctx, 23, 4.4, 3.4, 5, 1.6); ctx.fill();
   ctx.restore();
 
-  // 车顶红蓝警灯：不随车身旋转，始终保持左右闪烁
-  ctx.save();
-  ctx.shadowBlur = 14;
-  ctx.shadowColor = blink ? '#ef4444' : '#38bdf8';
-  ctx.fillStyle = blink ? 'rgba(239,68,68,.95)' : 'rgba(239,68,68,.3)';
-  ctx.beginPath(); ctx.arc(x - 8, y - 26, 4.2, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = blink ? 'rgba(56,189,248,.3)' : 'rgba(56,189,248,.95)';
-  ctx.shadowColor = blink ? '#38bdf8' : '#ef4444';
-  ctx.beginPath(); ctx.arc(x + 8, y - 26, 4.2, 0, Math.PI * 2); ctx.fill();
+  // 车身描边：亮边勾轮廓，暗边压住路面
+  ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 1.5;
+  roundRect(ctx, -27, -12, 54, 24, 6); ctx.stroke();
+  ctx.strokeStyle = 'rgba(10,16,28,.7)'; ctx.lineWidth = 1.1;
+  roundRect(ctx, -28, -13, 56, 26, 7); ctx.stroke();
   ctx.restore();
 
   // 身份标签
   ctx.save();
-  ctx.fillStyle = 'rgba(6,20,38,.94)';
-  roundRect(ctx, x - 27, y - 57, 54, 16, 8); ctx.fill();
-  ctx.strokeStyle = 'rgba(125,211,252,.7)'; ctx.lineWidth = 1; ctx.stroke();
-  ctx.fillStyle = '#bae6fd'; ctx.font = 'bold 10px "Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(8,20,36,.95)';
+  roundRect(ctx, x - 30, y - 69, 60, 18, 9); ctx.fill();
+  ctx.strokeStyle = 'rgba(251,191,36,.85)'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = '#ffe9b8'; ctx.font = 'bold 10.5px "Microsoft YaHei",sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('消防车', x, y - 48.5);
+  ctx.fillText('消防车', x, y - 59.5);
   ctx.restore();
 
   // 故障标记
   if (t.fault){
-    ctx.fillStyle = 'rgba(239,68,68,.95)';
-    roundRect(ctx, x + 15, y - 34, 34, 16, 8); ctx.fill();
-    ctx.fillStyle = '#fff'; ctx.font = '10px "Microsoft YaHei",sans-serif';
+    ctx.save();
+    ctx.fillStyle = 'rgba(239,68,68,.96)';
+    roundRect(ctx, x - 18, y + 34, 36, 16, 8); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 10px "Microsoft YaHei",sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('故障', x + 32, y - 26);
+    ctx.fillText('故障', x, y + 42);
+    ctx.restore();
   }
 
   // 机械臂：从车头伸向路障
   if (t.arm && t.arm.target){
     const tx = t.arm.target.x, ty = t.arm.target.y;
     const prog = t.arm.progress || 0;
-    const reach = 26 + (Math.hypot(tx-x,ty-y)-26)*clamp(prog,0,1);
+    const reach = 34 + (Math.hypot(tx-x,ty-y)-34)*clamp(prog,0,1);
     const ang = Math.atan2(ty-y, tx-x);
     const ex = x + Math.cos(ang)*reach, ey = y + Math.sin(ang)*reach;
     ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 3;
@@ -765,13 +863,13 @@ function drawTruck(t, s, now){
     }
   }
 
-  // 车顶水量条
-  const bw = 38, bh = 4;
-  ctx.fillStyle='rgba(6,12,22,.86)';
-  roundRect(ctx,x-bw/2,y-37,bw,bh,2); ctx.fill();
+  // 车顶水量条（紧贴定位环上沿，不遮挡警灯与标签）
+  const bw = 44, bh = 4.5;
+  ctx.fillStyle='rgba(6,12,22,.9)';
+  roundRect(ctx,x-bw/2,y-42,bw,bh,2.2); ctx.fill();
   const ratio = clamp(t.water/100,0,1);
   ctx.fillStyle = ratio < .1 ? '#ef4444' : ratio < .25 ? '#f59e0b' : '#38bdf8';
-  roundRect(ctx,x-bw/2,y-37,bw*ratio,bh,2); ctx.fill();
+  roundRect(ctx,x-bw/2,y-42,bw*ratio,bh,2.2); ctx.fill();
 }
 
 function findPrev(list, id){
@@ -782,8 +880,9 @@ function findPrev(list, id){
 
 function drawScene(now){
   if (!staticMap || !city) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0,0,W,H);
-  ctx.drawImage(staticMap,0,0);
+  ctx.drawImage(staticMap, 0, 0, W, H);
   const a = prevState, b = curState;
   if (!b) return;
   const span = Math.max(1, curStamp - prevStamp);
@@ -1315,6 +1414,7 @@ function animate(now){
 }
 
 async function boot(){
+  setupCanvas();
   try {
     city = await (await fetch('/api/city')).json();
     staticMap = buildStaticMap(city);
