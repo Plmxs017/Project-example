@@ -91,10 +91,20 @@ def api_fault(kind: str | None = None):
 
 
 @app.post("/api/obstacle")
-def api_obstacle(ahead: bool = False):
-    """放置路障；ahead=true 时放在小车正前方，方便演示机械臂清障。"""
+def api_obstacle(ahead: bool = False, kind: str = "barrier"):
+    """放置路障；ahead=true 时放在小车正前方，方便演示机械臂清障。
+
+    kind=heavy 放的是移不开的水泥墩，只能由 FOV 发现后绕行。
+    """
     with world_lock:
-        return world.spawn_obstacle(ahead=ahead)
+        return world.spawn_obstacle(ahead=ahead, kind=kind)
+
+
+@app.post("/api/jam")
+def api_jam():
+    """演示用：在车头前方路口制造一次临时拥堵，交给 FOV 感知与 AI 绕行。"""
+    with world_lock:
+        return world.spawn_jam_demo()
 
 
 @app.post("/api/reset")
@@ -123,6 +133,49 @@ def api_ai_execute():
 def api_ai_cancel():
     with world_lock:
         return world.cancel_ai()
+
+
+# ------------------------------------------------------------------ FOV / 地图编辑器
+@app.post("/api/fov/toggle")
+def api_fov_toggle(enabled: bool | None = None):
+    """开启 / 关闭 FOV 感知寻路；不传 enabled 时切换。"""
+    with world_lock:
+        return world.set_fov(enabled)
+
+
+@app.post("/api/editor/obstacle")
+def api_editor_obstacle(x: float, y: float, kind: str = "barrier"):
+    """地图编辑器：在画布坐标 (x, y) 放置路障；kind=heavy 为不可移开的路障。"""
+    with world_lock:
+        return world.add_obstacle_at(x, y, kind=kind)
+
+
+@app.post("/api/editor/fire")
+def api_editor_fire(x: float, y: float):
+    """地图编辑器：在画布坐标 (x, y) 新增火情。"""
+    with world_lock:
+        return world.add_fire_at(x, y)
+
+
+@app.post("/api/editor/pedestrian")
+def api_editor_pedestrian(x: float, y: float):
+    """地图编辑器：在最近的人行道节点新增行人。"""
+    with world_lock:
+        return world.add_pedestrian_at(x, y)
+
+
+@app.post("/api/editor/erase")
+def api_editor_erase(x: float, y: float):
+    """地图编辑器：删除点击位置附近的动态对象。"""
+    with world_lock:
+        return world.erase_at(x, y)
+
+
+@app.post("/api/editor/clear")
+def api_editor_clear():
+    """地图编辑器：清空全部火情、路障和自定义行人。"""
+    with world_lock:
+        return world.clear_dynamic()
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

@@ -1,6 +1,7 @@
 【三步跑起来】
 1. 安装依赖（一次性）：
-   cd patrol-sim\backend
+   在 inspection-bot 项目根目录执行：
+   cd backend
    pip install -r requirements.txt
    （装得慢就加国内镜像：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple）
 
@@ -8,13 +9,14 @@
    python -m uvicorn main:app --reload
 
 3. 浏览器打开：
-   http://127.0.0.1:8000       控制台（自动消防小车 + AI 领航员）
+   http://127.0.0.1:8000       控制台（自动消防小车 + AI 领航员 + FOV + 地图编辑器）
    http://127.0.0.1:8000/docs  接口调试台
 
 【跑单元测试】
-   cd patrol-sim\backend
-   python -m pytest tests
-   看到「29 passed」就说明代码是好的。
+   在项目根目录执行：
+   python -m pytest backend/tests -q
+   看到「83 passed」就说明代码是好的。
+   也可以在 backend 目录执行：python -m pytest tests -q
 
 【演示顺序（照着点就行）】
    1) 等 6 秒：自动出现火情 → 右侧「全车自检」六项逐项变绿 → 小车出发灭火
@@ -22,20 +24,36 @@
       地图出现紫色路线和编号站点，侧栏显示「比原顺序省 xx%」
    3) 点「🚀 执行」：小车按 AI 排好的顺序逐站灭火，右下角 MOMO 会播报「第 x/n 站」
    4) 点一下 MOMO：她会说一句路径规划小知识；点「–」可以收起气泡
-   5) 点「🚧 前方放路障」「🛠 注入故障」：AI 任务中断，回到清障 / 维修流程
-   6) 看行人：只走人行道/斑马线，红灯在路口等待；小车遇到行人会明显降速
+   5) 点「🚧 前方放路障」「🛠 注入故障」：普通路障近处由机械臂清掉、远处由 FOV 绕行；
+      只有故障 / 低水量才会中断 AI 去维修 / 补水
+   6) 看行人：只走人行道 / 斑马线，红灯在路口等待；只有走进行车道的行人才会让小车降速，
+      人行道上的行人不挡车
+   7) 看蓝色 FOV 扇形：它跟着车头转动，建筑会把视野切短；侧栏显示可见节点、识别目标和
+      重规划次数，下面的「视野感知反馈」会列出三类情况
+   8) 点「🧱 前方放重障」：水泥墩放在机械臂够不到、视野能看到的位置。侧栏出现
+      「不可移开路障」，MOMO 播报「AI 重规划」，紫色路线绕开被封锁的路口，任务继续
+   9) 点「🚗 制造拥堵」：车头前方路口停两辆车，FOV 会标出「路口拥堵」，AI 提前绕行；
+      18 秒后拥堵自动疏解。用「关闭 FOV 寻路」可以回到原来的全局 A* 调度
+   10) 在右侧「自定义地图编辑器」里选「🔥 火情」「🚧 路障」「🧱 重障」「🚶 行人」，
+       然后点击地图：火情会触发自检，普通路障会被绕行或清理，重障只能绕行，行人沿人行道走
+   11) 选「🧹 删除」后点击对象可移除；「清空动态」会清空火情、路障和自定义行人，
+       默认的 10 名行人会保留；按 Esc 退出编辑模式
+   12) 看私家车：常驻 2 辆深红色小车，遇消防车靠边让行；消防车是俯视绘制的
+       红车身 + 白色驾驶室 + 云梯，带白色定位环、光晕、红蓝警灯和「消防车」标签，比小车更醒目
 
 【文件是谁的地盘】
    backend/sim/city.py             城市路网、人行道、站点、火情点位
-   backend/sim/world.py            消防车状态机、行人、火情、机械臂、自检、AI 任务执行
+   backend/sim/world.py            消防车状态机、行人、火情、机械臂、自检、AI 任务执行、FOV / 感知反馈 / 编辑器
    backend/algo/pathfinding.py     BFS / A*（网格版 + 通用加权图版）
+   backend/algo/fov.py             FOV 视野锥、建筑遮挡、可见性 A*
    backend/algo/route_planner.py   AI 最优路线：最短路矩阵 + 2-opt + 状态压缩 DP
    backend/ai/detector.py          告警规则
-   backend/static/index.html       Canvas 控制台 + AI 面板 + MOMO 助手
+   backend/static/index.html       Canvas 控制台 + AI 面板 + MOMO 助手 + FOV / 感知反馈 / 编辑器
    backend/static/assets/          AI 助手立绘
    backend/main.py                 HTTP 接口 + 仿真心跳
-   backend/tests/                  自动验题器
+   backend/tests/                  自动验题器（83 个用例）
    docs/ai-route.md                AI 路线算法与接口说明
+   docs/requirements.md            需求与验收标准
    Dockerfile / docker-compose.yml / render.yaml / .github/   部署与流水线
 
 【铁律】
