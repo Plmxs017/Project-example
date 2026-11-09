@@ -18,6 +18,9 @@ import math
 import random
 from dataclasses import dataclass, field
 
+from algo.fov import (
+    fov_astar, line_of_sight, point_in_fov, visibility_polygon, visible_nodes,
+)
 from algo.pathfinding import graph_astar
 from algo.route_planner import plan as plan_multi_route
 from sim.city import CityMap
@@ -37,7 +40,21 @@ SELF_CHECK_STEP = 0.38   # 每个自检项目耗时
 AI_SCAN_TIME = 1.4       # AI 巡检点在点停留时间（秒）
 AI_ARRIVE = 42.0         # 判定「到达停靠点」的距离
 
-# ---- 私家车（NPC）：常驻路网，四辆，给消防车让行 ----
+# ---- FOV（视野）感知寻路：车头前方 110°、300 单位的视野锥 ----
+FOV_HALF_ANGLE = math.radians(55.0)
+FOV_RADIUS = 300.0
+FOV_RAYS = 41
+FOV_INVISIBLE_PENALTY = 1.28   # 视野外的路网边增加探索代价
+FOV_ARM_RANGE = 132.0          # 这个距离内的正前方路障交给机械臂，不抢方向
+FOV_OBSTACLE_ROAD_DIST = 135.0 # 路障离最近道路节点不超过这个距离才视为占道
+FOV_RANGE_BY_KIND = {
+    "fire": 300.0,
+    "obstacle": 300.0,
+    "pedestrian": 220.0,
+    "car": 260.0,
+}
+
+# ---- 私家车（NPC）：常驻路网，两辆，给消防车让行 ----
 CAR_MAX = 2              # 路网常驻私家车数量（不再随机刷新/消失）
 CAR_SPEED_MIN = 52.0     # 私家车巡航速度区间（比消防车慢，便于被追上时让行）
 CAR_SPEED_MAX = 68.0
@@ -124,6 +141,7 @@ class Fire:
     intensity: float = 100.0
     checked: bool = False
     unreachable: bool = False
+    custom: bool = False       # 由地图编辑器放置（用于「清空编辑内容」）
 
 
 @dataclass
@@ -131,6 +149,7 @@ class Obstacle:
     id: int
     x: float
     y: float
+    custom: bool = False
 
 
 @dataclass
@@ -145,6 +164,7 @@ class Pedestrian:
     waiting: bool = False
     wait_kind: str = ""
     state: str = "walking"
+    custom: bool = False       # 由地图编辑器放置
 
 
 @dataclass
@@ -202,6 +222,17 @@ class World:
         self.clear_way: dict | None = None
         self._truck_stuck = 0.0
         self._ped_block_timer = 0.0
+
+        # FOV：视野锥 + 可见节点 / 实体 + 已探索节点
+        self.fov_nav = True
+        self._fov_seen_nodes: set[int] = set()
+        self._fov_visible_nodes: set[int] = set()
+        self._fov_known_obstacles: dict[int, int] = {}
+        self._fov_polygon: list[tuple[float, float]] = []
+        self._fov_replans = 0
+        self._fov_last_replan: float | None = None
+        self.fov = self._empty_fov()
+
         self._jam_watch: dict[int, float] = {}
         self._jam_clear_timer = 0.0
         self._next_fire_id = 1
@@ -222,8 +253,26 @@ class World:
         if auto_spawn:
             for _ in range(CAR_MAX):
                 self.spawn_car()
+        self._update_fov(0.0)
 
     # ------------------------------------------------------------------ 基础工具
+    @staticmethod
+    def _empty_fov() -> dict:
+        return {
+            "enabled": True,
+            "half_angle_deg": round(math.degrees(FOV_HALF_ANGLE), 1),
+            "radius": FOV_RADIUS,
+            "heading": 0.0,
+            "polygon": [],
+            "visible_nodes": [],
+            "seen_nodes": 0,
+            "entities": [],
+            "blocked_nodes": [],
+            "path": [],
+            "replans": 0,
+            "last_replan": None,
+        }
+
     @staticmethod
     def _empty_self_check() -> dict:
         return {
@@ -265,6 +314,7 @@ class World:
         self.time += dt
         self._update_pedestrians(dt)
         self._update_self_check(dt)
+        self._update_fov(dt)
         self._update_truck(dt)
         self._update_cars(dt)
         self._update_clear_way(dt)
@@ -565,6 +615,140 @@ class World:
         # 障碍物本身是静态的；保留方法方便后续扩展（例如被火引燃）
         return
 
+    # ------------------------------------------------------------------ FOV 感知
+    def set_fov(self, enabled: bool | None = None) -> dict:
+        """开启 / 关闭 FOV 感知寻路；不传参数时切换当前状态。"""
+        self.fov_nav = (not self.fov_nav) if enabled is None else bool(enabled)
+        self._update_fov(0.0)
+        state = "开启" if self.fov_nav else "关闭"
+        self._log(f"FOV 感知寻路已{state}", "info")
+        return {"ok": True, "enabled": self.fov_nav, "msg": f"FOV 感知寻路已{state}"}
+
+    def _fov_blocked_nodes(self) -> set[int]:
+        """FOV 已经看到、且仍存在的路障节点。"""
+        blocked: set[int] = set()
+        alive = {o.id for o in self.obstacles}
+        for oid in list(self._fov_known_obstacles):
+            if oid not in alive:
+                self._fov_known_obstacles.pop(oid, None)
+                continue
+            obstacle = next((o for o in self.obstacles if o.id == oid), None)
+            if obstacle is None:
+                continue
+            # 近处正前方的路障交给机械臂清理，避免 FOV 让车绕开而永远清不到。
+            if math.hypot(obstacle.x - self.truck.x,
+                          obstacle.y - self.truck.y) < FOV_ARM_RANGE:
+                continue
+            blocked.add(self._fov_known_obstacles[oid])
+        blocked.discard(self.truck.goal_node)
+        return blocked
+
+    def _fov_has_sight(self, x: float, y: float, kind: str,
+                       origin: tuple[float, float] | None = None) -> bool:
+        t = self.truck
+        ox, oy = origin or (t.x, t.y)
+        radius = min(FOV_RADIUS, FOV_RANGE_BY_KIND.get(kind, FOV_RADIUS))
+        if not point_in_fov((ox, oy), t.heading, FOV_HALF_ANGLE, radius, (x, y)):
+            return False
+        return line_of_sight((ox, oy), (x, y), self.city.buildings, margin=1.0)
+
+    def _update_fov(self, dt: float = 0.0) -> None:
+        """刷新视野锥、可见实体、已探索节点；发现新路障时动态重规划。"""
+        t = self.truck
+        origin = (t.x, t.y)
+        buildings = self.city.buildings
+
+        self._fov_polygon = visibility_polygon(
+            origin, t.heading, FOV_HALF_ANGLE, FOV_RADIUS, buildings, FOV_RAYS,
+        )
+        self._fov_visible_nodes = visible_nodes(
+            self.city.road.xy, origin, t.heading, FOV_HALF_ANGLE,
+            FOV_RADIUS, buildings,
+        )
+        self._fov_seen_nodes |= self._fov_visible_nodes
+
+        entities: list[dict] = []
+
+        def add(kind: str, eid: int, x: float, y: float) -> None:
+            if not self._fov_has_sight(x, y, kind, origin):
+                return
+            entities.append({
+                "kind": kind, "id": eid,
+                "x": round(x, 1), "y": round(y, 1),
+                "distance": round(math.hypot(x - t.x, y - t.y), 1),
+            })
+
+        for fire in self.fires:
+            add("fire", fire.id, fire.x, fire.y)
+        for obstacle in self.obstacles:
+            add("obstacle", obstacle.id, obstacle.x, obstacle.y)
+        for ped in self.pedestrians:
+            add("pedestrian", ped.id, ped.x, ped.y)
+        for car in self.cars:
+            cx, cy = self._car_drawn_xy(car)
+            add("car", car.id, cx, cy)
+
+        # 只记住真正落在道路附近的障碍物，避免把路边装饰当成车道封锁。
+        alive = {o.id: o for o in self.obstacles}
+        for oid in list(self._fov_known_obstacles):
+            if oid not in alive:
+                self._fov_known_obstacles.pop(oid, None)
+        newly_seen: set[int] = set()
+        for ent in entities:
+            if ent["kind"] != "obstacle":
+                continue
+            oid = ent["id"]
+            if oid in self._fov_known_obstacles:
+                continue
+            obstacle = alive.get(oid)
+            if obstacle is None:
+                continue
+            node = self.city.nearest_road_node(obstacle.x, obstacle.y)
+            nx, ny = self.city.road.xy[node]
+            if math.hypot(obstacle.x - nx, obstacle.y - ny) <= FOV_OBSTACLE_ROAD_DIST:
+                self._fov_known_obstacles[oid] = node
+                newly_seen.add(oid)
+
+        blocked = sorted(self._fov_blocked_nodes())
+        path: list[list[float]] = []
+        if self.fov_nav and t.state in (
+                "to_fire", "to_refill", "to_repair", "ai_mission"):
+            remaining = t.waypoints[t.wp_index:]
+            if remaining:
+                path = [[round(t.x, 1), round(t.y, 1)]]
+                path += [[round(x, 1), round(y, 1)] for x, y in remaining]
+
+        self.fov = {
+            "enabled": self.fov_nav,
+            "half_angle_deg": round(math.degrees(FOV_HALF_ANGLE), 1),
+            "radius": FOV_RADIUS,
+            "heading": round(t.heading, 3),
+            "polygon": [[x, y] for x, y in self._fov_polygon],
+            "visible_nodes": sorted(self._fov_visible_nodes),
+            "seen_nodes": len(self._fov_seen_nodes),
+            "entities": entities,
+            "blocked_nodes": blocked,
+            "path": path,
+            "replans": self._fov_replans,
+            "last_replan": self._fov_last_replan,
+        }
+
+        # 新看到的路障如果正压在当前剩余路线上，就地重新规划；没有绕行
+        # 空间时保留原路线，交给机械臂 / 等待处理，绝不让车辆卡死。
+        if not self.fov_nav or not newly_seen or not self._truck_busy():
+            return
+        remaining_route = set(t.route[t.wp_index:])
+        hit = [n for oid, n in self._fov_known_obstacles.items()
+               if oid in newly_seen and n in remaining_route and n != t.goal_node]
+        if not hit:
+            return
+        if self._replan_truck():
+            self._fov_replans += 1
+            self._fov_last_replan = round(self.time, 1)
+            self.fov["replans"] = self._fov_replans
+            self.fov["last_replan"] = self._fov_last_replan
+            self._log("FOV 发现前方路障，已按可见道路重新规划绕行路线", "warning")
+
     # ------------------------------------------------------------------ 寻路 / 调度
     def _lane_waypoints(self, route: list[int]) -> list[tuple[float, float]]:
         """把道路节点序列转成「靠右车道」的连续航点。
@@ -588,10 +772,30 @@ class World:
         ahead = (self.truck.x + math.cos(self.truck.heading) * 45.0,
                  self.truck.y + math.sin(self.truck.heading) * 45.0)
         start_node = self.city.nearest_road_node(*ahead)
-        route = graph_astar(self.city.road.adj, start_node, goal_node, self.city.road.xy)
+        blocked = self._fov_blocked_nodes() if self.fov_nav else set()
+        route = None
+        if blocked:
+            # 只有 FOV 真正发现「需要绕行」的路障时才改变路线，
+            # 平时仍走原有全局 A*，保证旧功能的行为不变。
+            route = fov_astar(
+                self.city.road.adj, start_node, goal_node, self.city.road.xy,
+                visible=self._fov_visible_nodes, blocked=blocked,
+                invisible_penalty=FOV_INVISIBLE_PENALTY,
+            )
+        if route is None:
+            route = graph_astar(self.city.road.adj, start_node, goal_node,
+                                self.city.road.xy)
         if not route:
             start_node = self.city.nearest_road_node(self.truck.x, self.truck.y)
-            route = graph_astar(self.city.road.adj, start_node, goal_node, self.city.road.xy)
+            if blocked:
+                route = fov_astar(
+                    self.city.road.adj, start_node, goal_node, self.city.road.xy,
+                    visible=self._fov_visible_nodes, blocked=blocked,
+                    invisible_penalty=FOV_INVISIBLE_PENALTY,
+                )
+            if route is None:
+                route = graph_astar(self.city.road.adj, start_node, goal_node,
+                                    self.city.road.xy)
         if not route:
             return None
         length = 0.0
@@ -822,6 +1026,7 @@ class World:
         t = self.truck
         t.state = "ai_mission"
         t.spray = False
+        t.goal_node = stop["node"]
         t.route = list(route)
         t.waypoints = self._lane_waypoints(route)
         t.wp_index = 0
@@ -1093,6 +1298,118 @@ class World:
         self.obstacles.append(obstacle)
         self._log(f"道路上出现路障 #{obstacle.id}", "warning")
         return {"ok": True, "obstacle_id": obstacle.id}
+
+    # ------------------------------------------------------------------ 地图编辑器
+    def _clamp_xy(self, x: float, y: float, margin: float = 20.0) -> tuple[float, float]:
+        return (max(margin, min(self.city.WIDTH - margin, float(x))),
+                max(margin, min(self.city.HEIGHT - margin, float(y))))
+
+    def add_obstacle_at(self, x: float, y: float) -> dict:
+        """地图编辑器：在任意位置放一个路障。"""
+        x, y = self._clamp_xy(x, y)
+        if len(self.obstacles) >= 12:
+            return {"ok": False, "msg": "路障太多，请先清理一些"}
+        obstacle = Obstacle(id=self._next_obstacle_id, x=round(x, 1),
+                            y=round(y, 1), custom=True)
+        self._next_obstacle_id += 1
+        self.obstacles.append(obstacle)
+        self._update_fov(0.0)
+        self._log(f"地图编辑器放置路障 #{obstacle.id}", "warning")
+        return {"ok": True, "obstacle_id": obstacle.id,
+                "x": obstacle.x, "y": obstacle.y}
+
+    def add_fire_at(self, x: float, y: float) -> dict:
+        """地图编辑器：新增火情。
+
+        火点会绑定最近的道路节点供消防车停靠；如果点击位置离道路太远，
+        就把火点拉回到 50 单位以内，保证到达后一定在 100 的喷水范围内。
+        """
+        x, y = self._clamp_xy(x, y)
+        if any(math.hypot(f.x - x, f.y - y) < 30 for f in self.fires):
+            return {"ok": False, "msg": "这里已经有火情了"}
+        anchor = self.city.nearest_road_node(x, y)
+        ax, ay = self.city.road.xy[anchor]
+        dx, dy = x - ax, y - ay
+        dist = math.hypot(dx, dy)
+        if dist > 50.0:
+            x, y = ax + dx / dist * 50.0, ay + dy / dist * 50.0
+        fire = Fire(id=self._next_fire_id, x=round(x, 1), y=round(y, 1),
+                    anchor_node=anchor, checked=False, custom=True)
+        self._next_fire_id += 1
+        self.fires.append(fire)
+        self._log(f"地图编辑器新增火情 #{fire.id}", "critical")
+        if self.truck.state == "idle" and not self.self_check["running"]:
+            self.start_self_check("fire", fire.id)
+        return {"ok": True, "fire_id": fire.id, "x": fire.x, "y": fire.y}
+
+    def add_pedestrian_at(self, x: float, y: float) -> dict:
+        """地图编辑器：在最近的人行道节点生成一名行人。"""
+        x, y = self._clamp_xy(x, y)
+        if len(self.pedestrians) >= 40:
+            return {"ok": False, "msg": "行人太多了，请先清理一些"}
+        start = self.city.nearest_ped_node(x, y)
+        for _attempt in range(12):
+            goal = self.city.random_ped_node(self.rng)
+            if goal == start:
+                continue
+            path = self.city.ped_route(start, goal)
+            if len(path) < 2:
+                continue
+            px, py = self.city.ped.xy[start]
+            ped = Pedestrian(
+                id=self._next_ped_id, x=px, y=py,
+                speed=self.rng.uniform(20, 30),
+                emoji=self.rng.choice(["🚶", "🚶", "🚶‍♂️", "🚶‍♀️"]),
+                path=path, idx=1, custom=True,
+            )
+            self._next_ped_id += 1
+            self._maybe_wait(ped)
+            self.pedestrians.append(ped)
+            self._log(f"地图编辑器新增行人 #{ped.id}", "info")
+            return {"ok": True, "pedestrian_id": ped.id,
+                    "x": round(px, 1), "y": round(py, 1)}
+        return {"ok": False, "msg": "附近没有可用的人行道路线"}
+
+    def erase_at(self, x: float, y: float, radius: float = 38.0) -> dict:
+        """地图编辑器：删除离点击位置最近的路障 / 火情 / 行人。"""
+        x, y = self._clamp_xy(x, y)
+        candidates: list[tuple[float, str, object]] = []
+        for obstacle in self.obstacles:
+            candidates.append((math.hypot(obstacle.x - x, obstacle.y - y),
+                               "obstacle", obstacle))
+        for fire in self.fires:
+            candidates.append((math.hypot(fire.x - x, fire.y - y), "fire", fire))
+        for ped in self.pedestrians:
+            candidates.append((math.hypot(ped.x - x, ped.y - y), "pedestrian", ped))
+        if not candidates:
+            return {"ok": False, "msg": "这里没有可删除的动态对象"}
+        dist, kind, target = min(candidates, key=lambda item: item[0])
+        if dist > radius:
+            return {"ok": False, "msg": "离对象太远，请点得更准一些"}
+        if kind == "obstacle":
+            self.obstacles = [o for o in self.obstacles if o.id != target.id]
+            self._fov_known_obstacles.pop(target.id, None)
+        elif kind == "fire":
+            self.fires = [f for f in self.fires if f.id != target.id]
+        else:
+            self.pedestrians = [p for p in self.pedestrians if p.id != target.id]
+        self._update_fov(0.0)
+        self._log(f"地图编辑器删除{ {'obstacle': '路障', 'fire': '火情', 'pedestrian': '行人'}[kind] } "
+                  f"#{target.id}", "info")
+        return {"ok": True, "kind": kind, "id": target.id}
+
+    def clear_dynamic(self) -> dict:
+        """清空编辑器添加的内容：全部火情 / 路障 + 自定义行人。"""
+        fires = len(self.fires)
+        obstacles = len(self.obstacles)
+        peds = len([p for p in self.pedestrians if p.custom])
+        self.fires = []
+        self.obstacles = []
+        self.pedestrians = [p for p in self.pedestrians if not p.custom]
+        self._fov_known_obstacles.clear()
+        self._update_fov(0.0)
+        self._log(f"地图编辑器清空：火情 {fires}、路障 {obstacles}、自定义行人 {peds}", "info")
+        return {"ok": True, "fires": fires, "obstacles": obstacles, "pedestrians": peds}
 
     # ------------------------------------------------------------------ 行人
     def _spawn_pedestrian(self) -> None:
@@ -1757,6 +2074,8 @@ class World:
         planned = self._plan_route(t.goal_node)
         if planned is None:
             return False
+        if planned[0] == t.route:
+            return False
         self._set_route(planned[0], t.goal_node)
         return True
     # ------------------------------------------------------------------ 消防车被堵 / 故障
@@ -2013,9 +2332,17 @@ class World:
                  "intensity": round(f.intensity, 1)}
                 for f in self.fires
             ],
-            "obstacles": [{"id": o.id, "x": round(o.x, 1), "y": round(o.y, 1)}
+            "obstacles": [{"id": o.id, "x": round(o.x, 1), "y": round(o.y, 1),
+                           "custom": o.custom}
                           for o in self.obstacles],
             "self_check": copy.deepcopy(self.self_check),
+            "fov": copy.deepcopy(self.fov),
+            "editor": {
+                "obstacles": len(self.obstacles),
+                "fires": len(self.fires),
+                "custom_pedestrians": len([p for p in self.pedestrians if p.custom]),
+                "total_pedestrians": len(self.pedestrians),
+            },
             "ai": self.ai_status(),
             "jam": ({"node": self.jam["node"], "phase": self.jam["phase"],
                      "x": round(self.city.road.xy[self.jam["node"]][0], 1),
