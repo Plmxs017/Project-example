@@ -57,7 +57,7 @@
   .actions button:active{transform:scale(.97)}
   .actions button:hover{filter:brightness(1.12)}
   .b-fire{background:#dc2626}.b-fault{background:#d97706}.b-check{background:#0284c7}
-  .b-block{background:#7c3aed}.b-reset{background:#334155}
+  .b-block{background:#7c3aed}.b-heavy{background:#b45309}.b-jam{background:#475569}.b-reset{background:#334155}
   .b-ai{background:linear-gradient(135deg,#db2777,#7c3aed)}
   .b-go{background:#0f766e}
   .b-fov{background:linear-gradient(135deg,#0ea5e9,#2563eb)}
@@ -74,6 +74,23 @@
   .fov-metrics .m{background:var(--panel2);border-radius:9px;padding:7px 8px}
   .fov-metrics .m b{display:block;font-size:15px;color:#7dd3fc;font-family:Consolas,monospace}
   .fov-metrics .m span{font-size:10px;color:var(--muted)}
+  /* FOV 感知反馈：不可移开路障 / 行人占道 / 路口拥堵 */
+  .fov-feedback{margin:10px 0 8px;border:1px solid #1f3450;border-radius:10px;background:rgba(9,19,32,.7);padding:8px 9px}
+  .fov-feedback-head{display:flex;justify-content:space-between;align-items:center;font-size:10.5px;color:#8fa3bf;letter-spacing:.3px;margin-bottom:7px}
+  .fov-feedback-head b{color:#7dd3fc;font-family:Consolas,monospace;font-size:11px}
+  .fov-counts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:7px}
+  .fov-counts .fc{font-size:10px;padding:2px 7px;border-radius:20px;background:#122036;border:1px solid #22344f;color:#a9bcd6}
+  .fov-counts .fc b{font-family:Consolas,monospace;color:#e2e8f0;margin:0 2px}
+  .fov-counts .fc-obstacle{border-color:rgba(239,68,68,.42);color:#fca5a5}
+  .fov-counts .fc-ped{border-color:rgba(251,191,36,.4);color:#fcd34d}
+  .fov-counts .fc-jam{border-color:rgba(148,163,184,.45);color:#cbd5e1}
+  .fov-events{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;max-height:112px;overflow:auto}
+  .fov-events li{font-size:10.5px;line-height:1.45;color:#9fb2ca;display:flex;gap:6px}
+  .fov-events li time{color:#526b8d;font-family:Consolas,monospace;flex:none}
+  .fov-events li em{display:block;font-style:normal;color:#64748b;font-size:10px}
+  .fov-events li.critical{color:#fca5a5}
+  .fov-events li.warning{color:#fcd34d}
+  .fov-events .empty{color:#5b708c}
   .alerts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;max-height:150px;overflow:auto}
   .alerts li{font-size:12px;line-height:1.45;padding:6px 8px;border-radius:8px;background:var(--panel2);border-left:3px solid #334155;color:#b9c9de}
   .alerts li.critical{border-color:var(--red);color:#fca5a5}
@@ -240,6 +257,8 @@
         <button class="b-fault" onclick="post('/api/fault')">🛠 注入故障</button>
         <button class="b-check" onclick="post('/api/selfcheck')">🔍 立即自检</button>
         <button class="b-block" onclick="post('/api/obstacle?ahead=true')">🚧 前方放路障</button>
+        <button class="b-heavy" onclick="post('/api/obstacle?ahead=true&kind=heavy')">🧱 前方放重障</button>
+        <button class="b-jam" onclick="post('/api/jam')">🚗 制造拥堵</button>
         <button class="b-ai" style="grid-column:1 / -1" onclick="aiPlanRequest()">✨ AI 最优路线</button>
         <button class="b-reset" style="grid-column:1 / -1" onclick="resetSim()">↻ 重置仿真</button>
       </div>
@@ -250,16 +269,27 @@
       <div class="fov-metrics">
         <div class="m"><b id="fovNodes">0</b><span>可见节点</span></div>
         <div class="m"><b id="fovObjects">0</b><span>识别目标</span></div>
-        <div class="m"><b id="fovReplans">0</b><span>FOV 绕行</span></div>
+        <div class="m"><b id="fovReplans">0</b><span>重规划</span></div>
       </div>
       <button class="b-fov" id="fovToggle" style="width:100%;border:0;border-radius:9px;padding:9px;color:#fff;font-family:inherit;font-size:12.5px;cursor:pointer" onclick="toggleFov()">关闭 FOV 寻路</button>
       <div class="ai-note" id="fovNote">车头 110° / 300 单位视野锥；建筑会遮挡视线，发现路障后自动绕行。</div>
+
+      <div class="fov-feedback">
+        <div class="fov-feedback-head">视野感知反馈 <b id="fovFeedbackTotal">0</b></div>
+        <div class="fov-counts">
+          <span class="fc fc-obstacle">🧱 不可移开 <b id="fovCountObstacle">0</b></span>
+          <span class="fc fc-ped">🚶 行人占道 <b id="fovCountPed">0</b></span>
+          <span class="fc fc-jam">🚗 路口拥堵 <b id="fovCountJam">0</b></span>
+        </div>
+        <ul class="fov-events" id="fovEvents"><li class="empty">暂时没有需要绕行的情况</li></ul>
+      </div>
     </div>
 
     <div class="card">
       <h3>自定义地图编辑器 <span class="badge" id="editorBadge">未选择</span></h3>
       <div class="editor-tools" id="editorTools">
         <button data-tool="obstacle" onclick="setEditorTool('obstacle')">🚧 路障</button>
+        <button data-tool="heavy" onclick="setEditorTool('heavy')">🧱 重障</button>
         <button data-tool="fire" onclick="setEditorTool('fire')">🔥 火情</button>
         <button data-tool="pedestrian" onclick="setEditorTool('pedestrian')">🚶 行人</button>
         <button data-tool="erase" onclick="setEditorTool('erase')">🧹 删除</button>
@@ -295,10 +325,10 @@
     </div>
 
     <div class="card legend">
-      <b>图例：</b><span class="emoji">🚒</span> 消防车　<span class="emoji">🚗</span> 私家车　<span class="emoji">🚶</span> 行人　<span class="emoji">🔥</span> 火情　<span class="emoji">🚧</span> 路障<br>
+      <b>图例：</b><span class="emoji">🚒</span> 消防车　<span class="emoji">🚗</span> 私家车　<span class="emoji">🚶</span> 行人　<span class="emoji">🔥</span> 火情　<span class="emoji">🚧</span> 路障（机械臂可移开）　<span class="emoji">🧱</span> 重障（移不开，只能绕行）<br>
       <span class="emoji">💧</span> 补水站　<span class="emoji">🔧</span> 维修站　信号灯：左点 N=南北，右点 E=东西<br>
-      <b>FOV：</b>蓝色扇形是车头视野，建筑会遮挡；发现路障后优先按可见道路绕行，近处路障仍交给机械臂。<br>
-      <b>编辑：</b>选择「路障 / 火情 / 行人」后点击地图放置，用「删除」清理；清空动态不会删除默认行人。<br>
+      <b>FOV：</b>蓝色扇形是车头视野，建筑会遮挡；视野里的路障、占道行人、拥堵路口会整理成「感知反馈」，需要绕行时自动让 AI 重排路线，近处路障仍交给机械臂。<br>
+      <b>编辑：</b>选择「路障 / 重障 / 火情 / 行人」后点击地图放置，用「删除」清理；重障是水泥墩，机械臂清不掉。<br>
       <b>规则：</b>行人只走人行道与斑马线；红灯在路口等待；小车遇行人降速，遇路障停车用机械臂移除。<br>
       <b>让行：</b>私家车常驻两辆，路口遇消防车停车让行，其他路段靠边避让。
     </div>
@@ -334,6 +364,8 @@ let aiPlan = null;              // 最近一次 /api/ai/route 的结果
 let aiThinking = false;         // 正在请求规划
 let aiSayTimer = null;          // 打字机定时器
 let lastAiKey = 'off';          // AI 任务进度去重
+let lastAiReplans = 0;          // AI 因 FOV 反馈重规划的次数（用于播报）
+let lastAiBlocked = [];         // 任务结束时仍被重障封锁的目标
 const AI_SKILLS = [
   '我盯着路网呢：三纵三横 9 个路口，A* 一次搜索不到 1 毫秒。',
   '小技巧：先跑远的点，2-opt 有时候能把绕回来的路砍掉一大截。',
@@ -342,7 +374,9 @@ const AI_SKILLS = [
   '水面低于 10% 要记得补，别学我抱着书忘记喝水…',
   '没有火情的时候，我会把整座城巡一遍，叫「预防性巡检」。',
   '蓝色扇形是我的 FOV 视野；建筑会挡住视线，看见路障时我会绕开。',
-  '想改地图？选右侧编辑器，点一下就能放路障、火情或行人。'
+  '水泥墩（🧱 重障）机械臂搬不动，只能让 FOV 提前发现、我重新排路线绕过去。',
+  '行人站在车道里我会减速等；只走人行道的行人不挡路。',
+  '想改地图？选右侧编辑器，点一下就能放路障、重障、火情或行人。'
 ];
 let aiSkillIdx = 0;
 
@@ -677,6 +711,81 @@ function drawPed(p){
   ctx.restore();
 }
 
+function drawObstacle(o, now){
+  ctx.save();
+  if (o.kind === 'heavy'){
+    const pulse = 0.5 + 0.5 * Math.sin(now / 240 + o.id);
+    ctx.strokeStyle = 'rgba(248,113,113,' + (0.45 + 0.3 * pulse) + ')';
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash([5, 5]); ctx.lineDashOffset = -now / 60;
+    ctx.beginPath(); ctx.arc(o.x, o.y, 22, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(12,20,34,.94)';
+    ctx.beginPath(); ctx.arc(o.x, o.y, 15, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(248,113,113,.95)'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(o.x, o.y, 15, 0, Math.PI * 2); ctx.stroke();
+    ctx.font = '19px ' + EMOJI_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('🧱', o.x, o.y + 1);
+    // 「移不开」小标签，和普通路障区分
+    ctx.font = '9px "Microsoft YaHei",sans-serif';
+    const label = '移不开';
+    const w = ctx.measureText(label).width + 10;
+    ctx.fillStyle = 'rgba(127,29,29,.95)';
+    roundRect(ctx, o.x - w / 2, o.y - 35, w, 14, 7); ctx.fill();
+    ctx.fillStyle = '#fecaca';
+    ctx.fillText(label, o.x, o.y - 28);
+  } else {
+    ctx.font = '24px ' + EMOJI_FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('🚧', o.x, o.y);
+  }
+  ctx.restore();
+}
+
+/* FOV 的三类感知反馈：不可移开路障 / 行人占道 / 路口拥堵 */
+const FOV_HAZARD_STYLE = {
+  obstacle:   { color: '#f87171', label: '重障挡路' },
+  pedestrian: { color: '#fbbf24', label: '行人占道' },
+  jam:        { color: '#a5b4fc', label: '路口拥堵' },
+};
+
+function drawFovHazards(s, now){
+  const fov = s.fov;
+  if (!fov || !fov.enabled) return;
+  // 被封锁的道路节点：红色小叉，说明 FOV 已经把这个路口标成不可通行
+  for (const mark of (fov.hard_marks || [])){
+    ctx.save();
+    ctx.strokeStyle = 'rgba(248,113,113,.75)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(mark.x - 6, mark.y - 6); ctx.lineTo(mark.x + 6, mark.y + 6);
+    ctx.moveTo(mark.x + 6, mark.y - 6); ctx.lineTo(mark.x - 6, mark.y + 6);
+    ctx.stroke();
+    ctx.restore();
+  }
+  for (const hz of (fov.hazards || [])){
+    const meta = FOV_HAZARD_STYLE[hz.kind] || FOV_HAZARD_STYLE.obstacle;
+    const r = 26 + 4 * Math.sin(now / 220 + (hz.x || 0) * 0.05);
+    ctx.save();
+    ctx.globalAlpha = .85;
+    ctx.strokeStyle = meta.color; ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]); ctx.lineDashOffset = -now / 55;
+    ctx.beginPath(); ctx.arc(hz.x, hz.y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    ctx.font = '10px "Microsoft YaHei",sans-serif';
+    const text = 'FOV · ' + meta.label;
+    const w = ctx.measureText(text).width + 14;
+    ctx.fillStyle = 'rgba(8,16,28,.9)';
+    roundRect(ctx, hz.x - w / 2, hz.y - r - 21, w, 16, 8); ctx.fill();
+    ctx.strokeStyle = meta.color; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = meta.color;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, hz.x, hz.y - r - 13);
+    ctx.restore();
+  }
+}
+
 function drawTruck(t, s, now){
   const x = t.x, y = t.y, heading = t.heading || 0;
   const checking = s.self_check && s.self_check.running;
@@ -921,14 +1030,9 @@ function drawScene(now){
   // 火情
   for (const f of s.fires) drawFire(f, now);
 
-  // 路障
-  for (const o of s.obstacles){
-    ctx.save();
-    ctx.font = '24px ' + EMOJI_FONT;
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText('🚧', o.x, o.y);
-    ctx.restore();
-  }
+  // 路障：普通路障机械臂能清掉，重障（水泥墩）移不开，只能绕行
+  for (const o of s.obstacles) drawObstacle(o, now);
+  drawFovHazards(s, now);
 
   // AI 规划路线（在地面元素之上、车辆之下）
   drawAiRoute(now);
@@ -1057,11 +1161,12 @@ function renderState(s){
   $('speedText').textContent = '速度 ' + t.speed.toFixed(1) + (t.slowing ? ' · 行人慢行' : '');
 
   const cars = s.cars || [];
-  const yielding = cars.filter(c => c.state !== 'driving').length;
+  const traffic = cars.filter(c => !c.temporary);
+  const yielding = traffic.filter(c => c.state !== 'driving').length;
   $('statsText').innerHTML =
     `灭火 ${s.stats.fires_out} ｜ 补水 ${s.stats.refills}<br>` +
     `维修 ${s.stats.repairs} ｜ 清障 ${s.stats.obstacles_cleared}<br>` +
-    `路上小车 ${cars.length}/${s.car_limit || 4}${yielding ? ` ｜ 让行 ${yielding}` : ''}`;
+    `路上小车 ${traffic.length}/${s.car_limit || 4}${yielding ? ` ｜ 让行 ${yielding}` : ''}`;
 
   // FOV 面板
   const fov = s.fov || {};
@@ -1074,8 +1179,24 @@ function renderState(s){
   $('fovReplans').textContent = fov.replans || 0;
   $('fovToggle').textContent = fovOn ? '关闭 FOV 寻路' : '开启 FOV 寻路';
   $('fovNote').textContent = fovOn
-    ? `车头 ${fov.half_angle_deg || 110}° / ${fov.radius || 300} 单位视野锥；建筑会遮挡视线，发现路障后自动绕行。`
+    ? `车头 ${fov.half_angle_deg || 110}° / ${fov.radius || 300} 单位视野锥；建筑会遮挡视线，路障 / 占道行人 / 拥堵会反馈给 AI 重排路线。`
     : 'FOV 寻路已关闭，车辆回到原有全局 A* 调度；视野锥不再显示。';
+
+  // FOV 感知反馈：三类异常的计数 + 最近事件
+  const counts = fov.counts || {};
+  $('fovCountObstacle').textContent = counts.obstacle || 0;
+  $('fovCountPed').textContent = counts.pedestrian || 0;
+  $('fovCountJam').textContent = counts.jam || 0;
+  const feedback = fov.feedback || [];
+  $('fovFeedbackTotal').textContent = feedback.length;
+  const fovEvents = $('fovEvents');
+  if (!feedback.length){
+    fovEvents.innerHTML = '<li class="empty">暂时没有需要绕行的情况</li>';
+  } else {
+    fovEvents.innerHTML = feedback.slice(0, 5).map(f =>
+      `<li class="${f.level}"><time>${f.time.toFixed(1)}s</time>`
+      + `<span>${f.text}<em>→ ${f.action}</em></span></li>`).join('');
+  }
 
   // 编辑器计数
   const ed = s.editor || {};
@@ -1176,12 +1297,15 @@ function renderAiPanel(){
     badge.className = 'badge run';
     panel.innerHTML = `
       <div class="ai-metrics" style="grid-template-columns:1fr 1fr 1fr">
-        <div class="m"><b>${Math.round(ai.total_distance || 0)}</b><span>总里程</span></div>
+        <div class="m"><b>${Math.round(ai.total_distance || 0)}</b><span>剩余里程</span></div>
         <div class="m"><b>${Math.round(ai.eta || 0)}s</b><span>预计</span></div>
-        <div class="m"><b>${(ai.visited || []).length}</b><span>已完成</span></div>
+        <div class="m"><b>${ai.completed || 0}</b><span>已完成</span></div>
       </div>
-      <ul class="ai-stops">${stopListHtml(ai.stops || [], ai.visited || [], ai.index)}</ul>`;
-    note.textContent = `车辆已由 AI 接管 · ${ai.mode_label} · 点「停止」可交还调度`;
+      <ul class="ai-stops">${stopListHtml(ai.stops || [], ai.visited || [], ai.index)}</ul>
+      ${(ai.blocked_targets || []).length
+        ? `<div class="ai-note" style="color:#fca5a5">被封锁、暂时到不了：${ai.blocked_targets.join('、')}</div>` : ''}`;
+    const replan = ai.replans ? ` · 已按 FOV 反馈重规划 ${ai.replans} 次` : '';
+    note.textContent = `车辆已由 AI 接管 · ${ai.mode_label}${replan} · 点「停止」可交还调度`;
     return;
   }
   if (aiPlan && aiPlan.ok){
@@ -1214,7 +1338,7 @@ async function postJson(url){
 }
 
 /* ============================================================ FOV / 地图编辑器 */
-const EDITOR_NAMES = { obstacle: '路障', fire: '火情', pedestrian: '行人', erase: '删除' };
+const EDITOR_NAMES = { obstacle: '路障', heavy: '重障', fire: '火情', pedestrian: '行人', erase: '删除' };
 
 function setEditorTool(tool){
   editorTool = (editorTool === tool) ? null : tool;
@@ -1226,7 +1350,9 @@ function setEditorTool(tool){
     badge.textContent = EDITOR_NAMES[editorTool] || '编辑中';
     badge.className = 'badge run';
     $('editorHint').textContent = editorTool === 'erase'
-      ? '删除模式：点击要移除的路障 / 火情 / 行人。'
+      ? '删除模式：点击要移除的路障 / 重障 / 火情 / 行人。'
+      : editorTool === 'heavy'
+      ? '重障模式：点击放置水泥墩，机械臂移不开，小车必须绕行。'
       : `编辑中：点击地图放置${EDITOR_NAMES[editorTool]}；按 Esc 退出。`;
     say(`地图编辑已开启：点击地图放置${EDITOR_NAMES[editorTool]}。`, '编辑地图');
   } else {
@@ -1250,7 +1376,10 @@ function canvasPoint(ev){
 
 async function placeEditor(tool, x, y){
   try {
-    const res = await postJson(`/api/editor/${tool}?x=${x.toFixed(1)}&y=${y.toFixed(1)}`);
+    // 重障复用路障接口，多带一个 kind=heavy
+    const endpoint = tool === 'heavy' ? 'obstacle' : tool;
+    const extra = tool === 'heavy' ? '&kind=heavy' : '';
+    const res = await postJson(`/api/editor/${endpoint}?x=${x.toFixed(1)}&y=${y.toFixed(1)}${extra}`);
     await pull();
     if (!res.ok){
       $('editorHint').textContent = res.msg || '这里不能放置，请换个位置。';
@@ -1260,6 +1389,7 @@ async function placeEditor(tool, x, y){
     let text = '';
     if (tool === 'erase') text = `已删除${EDITOR_NAMES[res.kind] || '对象'} #${res.id}。`;
     else if (tool === 'obstacle') text = `已放置路障 #${res.obstacle_id}。`;
+    else if (tool === 'heavy') text = `已放置不可移开的重障 #${res.obstacle_id}，小车会绕行。`;
     else if (tool === 'fire') text = `已新增火情 #${res.fire_id}，车辆会按火情流程自检。`;
     else text = `已在最近的人行道新增行人 #${res.pedestrian_id}。`;
     $('editorHint').textContent = text + ' 继续点击地图可继续编辑。';
@@ -1320,8 +1450,13 @@ async function aiPlanRequest(){
     aiPlan = plan;
     renderAiPanel();
     const kind = plan.mode === 'fire' ? '灭火' : '巡检';
+    const blocked = (plan.blocked_nodes || []).length;
+    const dropped = (plan.dropped || []).length;
+    let extra = '';
+    if (blocked) extra += `，已避开 ${blocked} 个被重障封锁的路口`;
+    if (dropped) extra += `，${dropped} 个目标被封死、暂时到不了`;
     say(`算完啦！${kind} ${plan.stops.length} 个点，最优 ${Math.round(plan.total_distance)} 米，`
-      + `比按发现顺序少跑 ${Math.round(plan.saved_distance)} 米（${plan.saved_percent}%）。点「出发」我带路！`, '已规划');
+      + `比按发现顺序少跑 ${Math.round(plan.saved_distance)} 米（${plan.saved_percent}%）${extra}。点「出发」我带路！`, '已规划');
   } catch (e){
     aiPlan = null;
     renderAiPanel();
@@ -1360,19 +1495,33 @@ async function aiCancel(){
 
 function handleAiState(s){
   const ai = s.ai || {};
+  let replanned = false;
+  if (ai.active && (ai.replans || 0) > lastAiReplans){
+    lastAiReplans = ai.replans;
+    replanned = true;
+    say(`AI 重规划：${ai.replan_reason || '前方需要绕行'}。`
+      + `已按新路况重排剩余路线（第 ${ai.replans} 次），继续执行。`, '重新规划');
+  }
+  if (!ai.active) lastAiReplans = 0;
+  else lastAiBlocked = ai.blocked_targets || [];
   const key = ai.active ? `${ai.index}/${ai.total}` : 'off';
-  if (key === lastAiKey) return;
+  if (key === lastAiKey && !replanned) return;
   const wasActive = lastAiKey !== 'off';
   lastAiKey = key;
-  if (ai.active){
+  if (ai.active && !replanned){
     const st = (ai.stops || [])[ai.index];
     if (ai.index === 0){
       say(`AI 已接管：${ai.mode_label}，共 ${ai.total} 站。第一站 ${st ? st.label : '出发'}。`, '执行中');
     } else {
       say(`第 ${ai.index + 1}/${ai.total} 站：${st ? st.label : '继续'}，出发～`, '执行中');
     }
-  } else if (wasActive){
-    say('任务收工！所有站点都处理完啦，我回待命点看书去咯。', '待命');
+  } else if (!ai.active && wasActive){
+    if (lastAiBlocked.length){
+      say(`任务结束：还有 ${lastAiBlocked.length} 个目标被重障封锁（${lastAiBlocked.join('、')}），暂时到不了。`, '待处理');
+    } else {
+      say('任务收工！所有站点都处理完啦，我回待命点看书去咯。', '待命');
+    }
+    lastAiBlocked = [];
   }
   renderAiPanel();
 }
